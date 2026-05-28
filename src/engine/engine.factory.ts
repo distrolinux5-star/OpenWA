@@ -92,14 +92,48 @@ export class EngineFactory implements OnModuleInit {
   }
 
   private createFallbackEngine(options: EngineCreateOptions): IWhatsAppEngine {
+    // ========== CONFIGURAZIONE MODIFICATA PER PUPPETEER-CORE ==========
+    // Configurazione base per puppeteer-core in modalità headless su Render
+    const puppeteerConfig = {
+      // Usa browser di sistema (puppeteer-core)
+      executablePath: this.configService.get<string>('engine.puppeteer.executablePath') ?? '/usr/bin/chromium-browser',
+      
+      // Modalità headless per ambiente server
+      headless: this.configService.get<boolean>('engine.puppeteer.headless') ?? true,
+      
+      // Argomenti essenziali per container Linux
+      args: this.configService.get<string[]>('engine.puppeteer.args') ?? [
+        '--no-sandbox',                    // ESSENZIALE per container Linux
+        '--disable-setuid-sandbox',        // ESSENZIALE per container Linux
+        '--disable-dev-shm-usage',         // Previene crash per memoria condivisa limitata
+        '--disable-gpu',                   // Necessario in modalità headless
+        '--disable-extensions',            // Riduce consumo risorse
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--single-process',                // Riduce consumo memoria (usa con cautela)
+      ],
+      
+      // Timeout più lungo per autenticazione
+      protocolTimeout: this.configService.get<number>('engine.puppeteer.protocolTimeout') ?? 120000,
+    };
+
+    // Log della configurazione per debug
+    this.logger.log('Creating WhatsApp engine with config:', {
+      action: 'engine_create_fallback',
+      sessionId: options.sessionId,
+      headless: puppeteerConfig.headless,
+      executablePath: puppeteerConfig.executablePath,
+      hasProxy: !!options.proxyUrl,
+    });
+
     // Legacy direct creation (fallback)
     return new WhatsAppWebJsAdapter({
       sessionId: options.sessionId,
       sessionDataPath: this.configService.get<string>('engine.sessionDataPath') ?? './data/sessions',
-      puppeteer: {
-        headless: this.configService.get<boolean>('engine.puppeteer.headless') ?? true,
-        args: this.configService.get<string[]>('engine.puppeteer.args') ?? ['--no-sandbox', '--disable-setuid-sandbox'],
-      },
+      puppeteer: puppeteerConfig,
       proxy: options.proxyUrl
         ? {
             url: options.proxyUrl,
