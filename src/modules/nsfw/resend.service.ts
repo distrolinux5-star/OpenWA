@@ -18,7 +18,7 @@ export class ResendService {
     try {
       await this.resend.emails.send({
         from: 'WhatsApp Monitor <onboarding@resend.dev>',
-        to: [process.env.NSFW_REPORT_EMAIL],
+        to: [process.env.NSFW_REPORT_EMAIL || ''],
         subject,
         html: `
           <h1>Report Messaggio WhatsApp</h1>
