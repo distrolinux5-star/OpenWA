@@ -1,4 +1,4 @@
-    import { Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -12,10 +12,10 @@ import { QUEUE_NAMES } from '../queue/queue-names';
 import { generateIdempotencyKey, generateDeliveryId } from './utils/idempotency.util';
 import { HookManager } from '../../core/hooks';
 
-// ========== AGGIUNGI QUESTE IMPORT ==========
+// ========== IMPORT PER NSFW ==========
 import { GroqService } from '../nsfw/groq.service';
-import { ResendService } from '../nsfw/resend.service';
-// ===========================================
+import { NsfwCheckerService } from '../nsfw/nsfw-checker.service';
+// =====================================
 
 export interface WebhookPayload {
   event: string;
@@ -47,10 +47,10 @@ export class WebhookService {
     private readonly webhookRepository: Repository<Webhook>,
     private readonly configService: ConfigService,
     private readonly hookManager: HookManager,
-    // ========== AGGIUNGI QUESTI PARAMETRI ==========
+    // ========== SERVIZI NSFW ==========
     private readonly groqService: GroqService,
-    private readonly resendService: ResendService,
-    // =============================================
+    private readonly nsfwCheckerService: NsfwCheckerService,
+    // =================================
     @Optional()
     @InjectQueue(QUEUE_NAMES.WEBHOOK)
     private readonly webhookQueue?: Queue<WebhookJobData>,
@@ -58,11 +58,11 @@ export class WebhookService {
     this.queueEnabled = configService.get<boolean>('queue.enabled', false);
   }
 
-  // ========== AGGIUNGI QUESTO METODO PRIVATO ==========
+  // ========== METODO NSFW MODIFICATO ==========
   /**
-   * Analizza il messaggio per contenuti NSFW e invia un alert email se necessario
+   * Aggiunge TUTTI i messaggi al buffer per classificazione batch
    */
-  private async checkAndReportNSFW(event: string, data: Record<string, unknown>): Promise<void> {
+  private async checkAndBufferMessage(event: string, data: Record<string, unknown>): Promise<void> {
     // Controlla solo eventi di tipo 'message.received'
     if (event !== 'message.received') {
       return;
@@ -72,24 +72,23 @@ export class WebhookService {
     const chatId = (data.chatId || data.from) as string;
     const from = data.from as string;
 
-    // Controlla solo messaggi di gruppo (chatId termina con @g.us)
+    // Aggiungi TUTTI i messaggi di gruppo al buffer (senza filtri NSFW/SAFE)
     if (messageBody && chatId?.endsWith('@g.us')) {
       try {
-        const isNsfw = await this.groqService.checkNSFW(messageBody);
-        if (isNsfw) {
-          await this.resendService.sendAlert({
-            from: from || 'unknown',
-            chatId: chatId,
-            body: messageBody,
-          }, true);
-          this.logger.log(`NSFW alert inviata per messaggio in gruppo ${chatId}`);
-        }
+        await this.nsfwCheckerService.addToBuffer({
+          from: from || 'unknown',
+          chatId: chatId,
+          body: messageBody,
+          sessionId: data.sessionId as string,
+        });
+        
+        this.logger.debug(`Messaggio aggiunto al buffer (${await this.nsfwCheckerService.getBufferSize()}/100) - Chat: ${chatId}`);
       } catch (error) {
-        this.logger.error(`Errore durante NSFW check: ${error.message}`);
+        this.logger.error(`Errore durante aggiunta al buffer: ${error.message}`);
       }
     }
   }
-  // ===================================================
+  // ===========================================
 
   async create(sessionId: string, dto: CreateWebhookDto): Promise<Webhook> {
     const webhook = this.webhookRepository.create({
@@ -195,12 +194,12 @@ export class WebhookService {
   }
 
   async dispatch(sessionId: string, event: string, data: Record<string, unknown>): Promise<void> {
-    // ========== AGGIUNGI QUESTA CHIAMATA ALL'INIZIO DEL METODO ==========
-    // Analisi NSFW - viene eseguita PRIMA dell'invio dei webhook esterni
-    await this.checkAndReportNSFW(event, data).catch(e => 
-      this.logger.error(`NSFW check fallita: ${e.message}`)
+    // ========== AGGIUNGI TUTTI I MESSAGGI AL BUFFER ==========
+    // Ogni messaggio viene aggiunto al buffer, indipendentemente dalla classificazione
+    await this.checkAndBufferMessage(event, data).catch(e => 
+      this.logger.error(`Errore nell'aggiunta al buffer: ${e.message}`)
     );
-    // ====================================================================
+    // ========================================================
 
     const webhooks = await this.webhookRepository.find({
       where: { sessionId, active: true },
