@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
 import * as qrcode from 'qrcode';
 import * as path from 'path';
+import puppeteer from 'puppeteer-core';  // AGGIUNGI QUESTO IMPORT
 import {
   IWhatsAppEngine,
   EngineStatus,
@@ -52,6 +53,7 @@ export interface WhatsAppWebJsConfig {
 
 export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngine {
   private client: Client | null = null;
+  private browser: any = null;  // AGGIUNGI: riferimento al browser
   private status: EngineStatus = EngineStatus.DISCONNECTED;
   private qrCode: string | null = null;
   private phoneNumber: string | null = null;
@@ -73,11 +75,14 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
       const puppeteerArgs = this.config.puppeteer?.args || [
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
+        '--disable-dev-shm-usage',  // Previene crash su memoria condivisa
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
+        '--disable-extensions',      // Riduce consumo risorse
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
       ];
 
       // Add proxy configuration if provided
@@ -88,6 +93,24 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         );
       }
 
+      // ========== GESTIONE OTTIMIZZATA DEL BROWSER ==========
+      // Crea un'unica istanza del browser da riutilizzare
+      this.logger.log('Avvio browser Chromium in modalità headless...');
+      
+      this.browser = await puppeteer.launch({
+        headless: this.config.puppeteer?.headless ?? true,
+        args: puppeteerArgs,
+        // Imposta un limite di memoria per Chromium
+        ...(process.env.NODE_OPTIONS?.includes('--max-old-space-size') && {
+          env: {
+            ...process.env,
+            NODE_OPTIONS: process.env.NODE_OPTIONS,
+          }
+        })
+      });
+      
+      this.logger.log('Browser avviato con successo');
+
       this.client = new Client({
         authStrategy: new LocalAuth({
           clientId: this.config.sessionId,
@@ -96,13 +119,21 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         puppeteer: {
           headless: this.config.puppeteer?.headless ?? true,
           args: puppeteerArgs,
+          // Passa il browser già avviato (opzionale, some version support this)
+          // browser: this.browser,
         },
       });
 
       this.setupEventHandlers();
       await this.client.initialize();
     } catch (error) {
+      this.logger.error(`Errore durante l'inizializzazione: ${error.message}`, error.stack);
       this.setStatus(EngineStatus.FAILED);
+      // Assicurati di chiudere il browser in caso di errore
+      if (this.browser) {
+        await this.browser.close().catch(e => this.logger.warn(`Errore chiusura browser: ${e.message}`));
+        this.browser = null;
+      }
       throw error;
     }
   }
@@ -133,6 +164,7 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
         this.pushName = info?.pushname || null;
         this.setStatus(EngineStatus.READY);
         this.callbacks.onReady?.(this.phoneNumber || '', this.pushName || '');
+        this.logger.log(`WhatsApp connesso: ${this.phoneNumber}`);
       } catch (error) {
         this.logger.error('Error getting client info', String(error));
         this.setStatus(EngineStatus.READY);
@@ -195,11 +227,13 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     });
 
     this.client.on('disconnected', reason => {
+      this.logger.warn(`WhatsApp disconnesso: ${reason}`);
       this.setStatus(EngineStatus.DISCONNECTED);
       this.callbacks.onDisconnected?.(reason);
     });
 
     this.client.on('auth_failure', () => {
+      this.logger.error('Autenticazione fallita');
       this.setStatus(EngineStatus.FAILED);
       this.callbacks.onDisconnected?.('Authentication failed');
     });
@@ -212,35 +246,56 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
   }
 
   async disconnect(): Promise<void> {
-    if (this.client) {
-      try {
+    try {
+      if (this.client) {
         // Use destroy instead of logout to preserve session data
-        // This allows reconnecting without needing to scan QR again
         await this.client.destroy();
-      } catch (error) {
-        this.logger.warn('Destroy client failed:', String(error));
-        // Already destroyed or not initialized - ignore
+        this.client = null;
       }
-      this.client = null;
+    } catch (error) {
+      this.logger.warn('Destroy client failed:', String(error));
+    } finally {
+      // ========== GARANTISCE LA CHIUSURA DEL BROWSER ==========
+      if (this.browser) {
+        try {
+          await this.browser.close();
+          this.logger.log('Browser chiuso correttamente');
+        } catch (error) {
+          this.logger.warn(`Errore chiusura browser: ${error.message}`);
+        }
+        this.browser = null;
+      }
       this.setStatus(EngineStatus.DISCONNECTED);
     }
   }
 
   async logout(): Promise<void> {
-    if (this.client) {
-      try {
-        // Logout clears session data - user will need to scan QR again
+    try {
+      if (this.client) {
         await this.client.logout();
-      } catch (error) {
-        this.logger.warn('Logout failed:', String(error));
-        // Fall back to destroy if logout fails
+        this.client = null;
+      }
+    } catch (error) {
+      this.logger.warn('Logout failed:', String(error));
+      if (this.client) {
         try {
           await this.client.destroy();
         } catch (destroyError) {
           this.logger.warn('Client destroy also failed during logout fallback', String(destroyError));
         }
+        this.client = null;
       }
-      this.client = null;
+    } finally {
+      // ========== GARANTISCE LA CHIUSURA DEL BROWSER ==========
+      if (this.browser) {
+        try {
+          await this.browser.close();
+          this.logger.log('Browser chiuso dopo logout');
+        } catch (error) {
+          this.logger.warn(`Errore chiusura browser: ${error.message}`);
+        }
+        this.browser = null;
+      }
       this.setStatus(EngineStatus.DISCONNECTED);
     }
   }
@@ -249,8 +304,18 @@ export class WhatsAppWebJsAdapter extends EventEmitter implements IWhatsAppEngin
     if (this.client) {
       await this.client.destroy();
       this.client = null;
-      this.setStatus(EngineStatus.DISCONNECTED);
     }
+    // ========== CHIUDI IL BROWSER ==========
+    if (this.browser) {
+      try {
+        await this.browser.close();
+        this.logger.log('Browser distrutto');
+      } catch (error) {
+        this.logger.warn(`Errore chiusura browser: ${error.message}`);
+      }
+      this.browser = null;
+    }
+    this.setStatus(EngineStatus.DISCONNECTED);
   }
 
   getStatus(): EngineStatus {
