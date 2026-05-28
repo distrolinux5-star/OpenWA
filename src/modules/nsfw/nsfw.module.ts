@@ -2,10 +2,10 @@
 import { Module } from '@nestjs/common';
 import { GroqService } from './groq.service';
 import { ResendService } from './resend.service';
-import { NsfwCheckerService } from './nsfw-checker.service';
+import { NsfwCheckerService } from './nsfw-checker.service';  // ← linea corretta
 
 @Module({
   providers: [GroqService, ResendService, NsfwCheckerService],
-  exports: [GroqService, ResendService, NsfwCheckerService],  // ESPORTA TUTTI I SERVIZI
+  exports: [GroqService, ResendService, NsfwCheckerService],
 })
 export class NsfwModule {}
