@@ -6,6 +6,6 @@ import { NsfwCheckerService } from './nsfw-checker.service';
 
 @Module({
   providers: [GroqService, ResendService, NsfwCheckerService],
-  exports: [GroqService, ResendService, NsfwCheckerService],
+  exports: [GroqService, ResendService, NsfwCheckerService],  // ESPORTA TUTTI I SERVIZI
 })
 export class NsfwModule {}
