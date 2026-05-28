@@ -1,59 +1,82 @@
-// src/modules/nsfw/resend.service.ts
+// src/modules/nsfw/nsfw-checker.service.ts
 import { Injectable, Logger } from '@nestjs/common';
-import { Resend } from 'resend';
+import { ResendService } from './resend.service';
 
 @Injectable()
-export class ResendService {
-  private readonly resend: Resend;
-  private readonly logger = new Logger(ResendService.name);
+export class NsfwCheckerService {  // ← ASSICURATI CHE CI SIA 'export'
+  private readonly logger = new Logger(NsfwCheckerService.name);
+  private messageBuffer: Array<{
+    from: string;
+    chatId: string;
+    body: string;
+    timestamp: string;
+    sessionId?: string;
+  }> = [];
+  
+  private readonly BATCH_SIZE = 100;
 
-  constructor() {
-    this.resend = new Resend(process.env.RESEND_API_KEY);
+  constructor(
+    private readonly resendService: ResendService,
+  ) {}
+
+  async addToBuffer(messageData: {
+    from: string;
+    chatId: string;
+    body: string;
+    sessionId?: string;
+  }): Promise<void> {
+    this.messageBuffer.push({
+      ...messageData,
+      timestamp: new Date().toISOString()
+    });
+    
+    this.logger.log(`Buffer: ${this.messageBuffer.length}/${this.BATCH_SIZE}`);
+    
+    if (this.messageBuffer.length >= this.BATCH_SIZE) {
+      await this.flushBuffer();
+    }
+  }
+  
+  async flushBuffer(): Promise<void> {
+    if (this.messageBuffer.length === 0) return;
+    
+    const messages = [...this.messageBuffer];
+    this.messageBuffer = [];
+    
+    this.logger.log(`Generazione report batch di ${messages.length} messaggi...`);
+    const reportHtml = this.generateAggregatedReport(messages);
+    
+    await this.resendService.sendBatchReport(reportHtml, messages.length, 0);
+    this.logger.log(`✅ Inviato report batch`);
+  }
+  
+  private generateAggregatedReport(messages: any[]): string {
+    const messageList = messages.map((msg, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${this.escapeHtml(msg.from)}</td>
+        <td>${this.escapeHtml(msg.chatId)}</td>
+        <td>${msg.timestamp}</td>
+        <td>${this.escapeHtml(msg.body?.substring(0, 100))}</td>
+      </tr>
+    `).join('');
+    
+    return `
+      <h1>Report Batch WhatsApp</h1>
+      <p>Totale messaggi: ${messages.length}</p>
+      <table border="1">
+        <thead><tr><th>#</th><th>Da</th><th>Chat</th><th>Data</th><th>Testo</th></tr></thead>
+        <tbody>${messageList}</tbody>
+      </table>
+    `;
   }
 
-  async sendAlert(messageData: any, isNsfw: boolean): Promise<void> {
-    const reportEmail = process.env.NSFW_REPORT_EMAIL;
-    
-    if (!reportEmail) {
-      this.logger.error('NSFW_REPORT_EMAIL non configurata');
-      return;
-    }
-
-    try {
-      await this.resend.emails.send({
-        from: 'WhatsApp Monitor <onboarding@resend.dev>',
-        to: [reportEmail],
-        subject: isNsfw ? '🚨 NSFW Alert' : 'Report moderazione',
-        html: `<p>Da: ${messageData.from}</p><p>Gruppo: ${messageData.chatId}</p><p>Testo: ${messageData.body}</p>`,
-      });
-      this.logger.log(`Alert email inviata`);
-    } catch (error) {
-      this.logger.error(`Errore invio email: ${error.message}`);
-    }
+  private escapeHtml(text: string): string {
+    if (!text) return '';
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  async sendBatchReport(htmlContent: string, messageCount: number, nsfwCount?: number): Promise<void> {
-    const reportEmail = process.env.NSFW_REPORT_EMAIL;
-    
-    if (!reportEmail) {
-      this.logger.error('NSFW_REPORT_EMAIL non configurata');
-      return;
-    }
-
-    const subject = nsfwCount !== undefined 
-      ? `📊 Report Batch - ${messageCount} msg`
-      : `📊 Report Batch - ${messageCount} messaggi`;
-
-    try {
-      await this.resend.emails.send({
-        from: 'WhatsApp Monitor <onboarding@resend.dev>',
-        to: [reportEmail],
-        subject,
-        html: htmlContent,
-      });
-      this.logger.log(`Batch report inviato: ${messageCount} messaggi`);
-    } catch (error) {
-      this.logger.error(`Errore invio batch report: ${error.message}`);
-    }
+  getBufferSize(): number {
+    return this.messageBuffer.length;
   }
 }
