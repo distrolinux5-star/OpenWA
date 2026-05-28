@@ -14,14 +14,12 @@ export class ResendService {
   async sendAlert(messageData: any, isNsfw: boolean): Promise<void> {
     const reportEmail = process.env.NSFW_REPORT_EMAIL;
     
-    // Controllo per evitare errori
     if (!reportEmail) {
-      this.logger.error('NSFW_REPORT_EMAIL non configurata nelle variabili d\'ambiente');
+      this.logger.error('NSFW_REPORT_EMAIL non configurata');
       return;
     }
 
     const subject = isNsfw ? '🚨 NSFW Alert: Messaggio WhatsApp' : 'ℹ️ Report di moderazione WhatsApp';
-    const type = isNsfw ? 'NSFW' : 'SAFE';
 
     try {
       await this.resend.emails.send({
@@ -30,17 +28,40 @@ export class ResendService {
         subject,
         html: `
           <h1>Report Messaggio WhatsApp</h1>
-          <p><strong>Classificazione:</strong> ${type}</p>
           <p><strong>Da:</strong> ${messageData.from || 'sconosciuto'}</p>
           <p><strong>Chat:</strong> ${messageData.chatId || 'sconosciuto'}</p>
-          <p><strong>Timestamp:</strong> ${new Date().toISOString()}</p>
           <p><strong>Messaggio:</strong></p>
           <blockquote>${messageData.body || 'testo vuoto'}</blockquote>
         `,
       });
-      this.logger.log(`Alert email inviata per messaggio ${isNsfw ? 'NSFW' : 'SAFE'}`);
+      this.logger.log(`Alert email inviata`);
     } catch (error) {
-      this.logger.error(`Errore invio email: ${error.message}`, error.stack);
+      this.logger.error(`Errore invio email: ${error.message}`);
+    }
+  }
+
+  async sendBatchReport(htmlContent: string, messageCount: number, nsfwCount?: number): Promise<void> {
+    const reportEmail = process.env.NSFW_REPORT_EMAIL;
+    
+    if (!reportEmail) {
+      this.logger.error('NSFW_REPORT_EMAIL non configurata');
+      return;
+    }
+
+    const subject = nsfwCount !== undefined 
+      ? `📊 Report Batch - ${messageCount} msg (${nsfwCount} NSFW)`
+      : `📊 Report Batch - ${messageCount} messaggi`;
+
+    try {
+      await this.resend.emails.send({
+        from: 'WhatsApp Monitor <onboarding@resend.dev>',
+        to: [reportEmail],
+        subject,
+        html: htmlContent,
+      });
+      this.logger.log(`Batch report inviato: ${messageCount} messaggi`);
+    } catch (error) {
+      this.logger.error(`Errore invio batch report: ${error.message}`);
     }
   }
 }
